@@ -1,9 +1,10 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:gal/gal.dart';
-import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 
 void main() {
@@ -17,6 +18,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'HDR merger',
       theme: ThemeData(primarySwatch: Colors.blue),
       home: const HomePage(title: 'Home page'),
@@ -85,34 +87,9 @@ class EditPage extends StatefulWidget {
   State<EditPage> createState() => _EditPageState();
 }
 
-Uint8List _createFinalImageInANewThread(Map<String, dynamic> args) {
-  final bytesBase = File(args['paths'][0]).readAsBytesSync();
-  img.Image? baseImage = img.decodeImage(bytesBase);
-  if (baseImage == null) {
-    throw Exception("Error while decoding the base image");
-  }
-
-  for (int i = 1; i < args['paths'].length; i++) {
-    final bytesOverlay = File(args['paths'][i]).readAsBytesSync();
-    img.Image? imageOverlay = img.decodeImage(bytesOverlay);
-    if (imageOverlay == null) continue;
-
-    double opacity = args['opacities'][i];
-    int alphaValue = (opacity * 255).toInt();
-
-    // Adjust opacity via a synchronous loop (or any synchronous operation)
-    for (int y = 0; y < imageOverlay.height; y++) {
-      for (int x = 0; x < imageOverlay.width; x++) {
-        img.Pixel pixel = imageOverlay.getPixel(x, y);
-        imageOverlay.setPixelRgba(x, y, pixel.r, pixel.g, pixel.b, alphaValue);
-      }
-    }
-  }
-
-  return Uint8List.fromList(img.encodePng(baseImage));
-}
-
 class _EditPageState extends State<EditPage> {
+  final GlobalKey _globalKey = GlobalKey();
+
   void _imageSelected(int index) {
     setState(() {
       widget.selectedIndex = index;
@@ -165,18 +142,29 @@ class _EditPageState extends State<EditPage> {
     );
   }
 
-  Future<Uint8List> _createFinalImage() async {
+  Future<Uint8List?> _createFinalImage() async {
     final List<String> imagePaths =
         widget.images.map((xFile) => xFile.path).toList();
     final List<double> opacities = widget.opacityMap.values.toList();
 
-    print("llegado antes de llegado");
-    print(imagePaths);
-    print(opacities);
-    return await compute(_createFinalImageInANewThread, {
-      'paths': imagePaths,
-      'opacities': opacities,
-    });
+    try {
+      // Find the RenderRepaintBoundary using the global key.
+      RenderRepaintBoundary? boundary =
+          _globalKey.currentContext?.findRenderObject()
+              as RenderRepaintBoundary?;
+      if (boundary == null) return null;
+
+      // Capture the image with the current device pixel ratio.
+      ui.Image image = await boundary.toImage(
+        pixelRatio: MediaQuery.of(context).devicePixelRatio,
+      );
+      ByteData? byteData = await image.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+      return byteData?.buffer.asUint8List();
+    } catch (e) {
+      print('Error capturing image: $e');
+    }
   }
 
   Future<void> _saveCompositeImage(Uint8List imageBytes) async {
@@ -242,7 +230,8 @@ class _EditPageState extends State<EditPage> {
 
       print('Exporting image...');
       // Create the composite image.
-      Uint8List compositeBytes = await _createFinalImage();
+      Uint8List? compositeBytes = await _createFinalImage();
+      if (compositeBytes == null) throw Error();
 
       // Save the composite image.
       await _saveCompositeImage(compositeBytes);
@@ -326,16 +315,19 @@ class _EditPageState extends State<EditPage> {
   Widget _createGeneralImage() {
     return Padding(
       padding: EdgeInsets.only(left: 10.0),
-      child: Stack(
-        children:
-            widget.images.asMap().entries.map((entry) {
-              int index = entry.key;
-              XFile imageFile = entry.value;
-              return Opacity(
-                opacity: _getOpacityValue(index),
-                child: Image.file(File(imageFile.path)),
-              );
-            }).toList(),
+      child: RepaintBoundary(
+        key: _globalKey,
+        child: Stack(
+          children:
+              widget.images.asMap().entries.map((entry) {
+                int index = entry.key;
+                XFile imageFile = entry.value;
+                return Opacity(
+                  opacity: _getOpacityValue(index),
+                  child: Image.file(File(imageFile.path)),
+                );
+              }).toList(),
+        ),
       ),
     );
   }
